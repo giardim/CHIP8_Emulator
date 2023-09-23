@@ -32,6 +32,7 @@ typedef struct{
     bool display[64*32];    //check if each pixel is on or off
 }chip8_t;
 
+
 //Set config settings
 bool set_config_setting(config_t *config, const int argc, char **argv){
     //DEFAULTS
