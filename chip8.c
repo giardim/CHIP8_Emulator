@@ -7,11 +7,14 @@
 
 //https://github.com/kripod/chip8-roms
 
+//SDL object
 typedef struct{
     SDL_Window *window;
     SDL_Renderer *renderer;
 }sdl_t;
 
+
+//Configuration object
 typedef struct{
     uint32_t screenWidth;   //Chip8 width
     uint32_t screenHeight;  //Chip8 height
@@ -20,6 +23,17 @@ typedef struct{
     uint32_t scaleFactor;   //Scale the size of a Chip8 pixel
 }config_t;
 
+//Opcode format
+typedef struct{
+    uint16_t opcode;
+    uint16_t NNN;       //12 bit address after the highest bit
+    uint8_t NN;         //8 bit address after the highest bit
+    uint8_t N;          //Constant 4 bit N
+    uint8_t X;          //Constant 4 register ID X
+    uint8_t Y;          //Constant 4 register ID Y
+}instruction_t;
+
+//Chip8 states
 typedef enum{
     QUIT,
     RUNNING,
@@ -34,6 +48,7 @@ typedef struct{
     bool display[64*32];    //check if each pixel is on or off
     uint16_t PC;            //Program counter
     uint16_t stack[12];     //Subroutine stack -> 12 levels of nesting
+    uint16_t *stack_ptr;    //Points to the stack and keeps track of how many subroutines are in the stack
     uint8_t v[16];          //16 registers, V0 - VF each a byte
     uint16_t I;             //Instruction register
     //Both timers decrement at 60hz
@@ -41,8 +56,8 @@ typedef struct{
     uint8_t sound_timer;    //Sound timer
     bool keypad[16];        //hex keyboard, 0-F
     const char* rom_name;         //Name of rom currently loaded
+    instruction_t inst;     //currently executing instruction
 }chip8_t;
-
 
 //Set config settings
 bool set_config_setting(config_t *config, const int argc, char **argv){
@@ -145,6 +160,7 @@ bool init_chip8(chip8_t *chip8, const char rom_name[]){
     chip8 -> state = RUNNING;
     chip8 -> rom_name = rom_name;
     chip8 -> PC = entry_point;             //Where chip8 programs are loaded
+    chip8 -> stack_ptr = &chip8->stack[0];
     return true;
 }
 
@@ -201,6 +217,43 @@ void get_input(chip8_t *chip8){
     return;
 }
 
+void emulate_instruction(chip8_t *chip8){
+    //Get opcode
+    chip8->inst.opcode = (chip8->ram[chip8->PC] << 8) | chip8->ram[chip8->PC + 1] ;
+    chip8->PC += 2; //increment for next opcode
+
+    chip8->inst.NNN = chip8->inst.opcode & 0x0FFF;
+    chip8->inst.NN = chip8->inst.opcode & 0x00FF;
+    chip8->inst.N = chip8->inst.opcode & 0x0F;
+    chip8->inst.X = (chip8->inst.opcode >> 8) & 0x0F;
+    chip8->inst.Y = (chip8->inst.opcode >> 4) & 0x0F;
+    //Emulate opcode
+    switch (chip8->inst.opcode >> 12 & 0x0F){
+        case(0x0):
+            if(chip8->inst.NN == 0xE0){
+                //Clear the screen
+                memset(&chip8->display, false, sizeof(chip8->display));
+            }
+            else if (chip8->inst.NN == 0xEE){
+                //return from subroutine
+                chip8 -> PC = *--chip8 -> stack_ptr;
+            }
+            break;
+        case(0x2):
+            //call Subroutine
+            //Put current program in the stack so we can return to it later, then set the
+            //  program counter to the last 12bits in the opcode (NNN)
+            *chip8->stack_ptr = chip8->PC;
+            chip8->stack_ptr++;
+            chip8->PC = chip8->inst.NNN;
+            break;
+        default:
+            puts("ERROR: INVALID OPCODE PRESENT");
+            break;
+
+    }
+}
+
 int main (int argc, char **argv){
     if (argc<2){
         fprintf(stderr, "Usage: %s <rom_name>\n", argv[0]);
@@ -234,6 +287,8 @@ int main (int argc, char **argv){
         get_input(&chip8);
 
         if (chip8.state == PAUSED) continue;
+
+        emulate_instruction(&chip8);
 
         //delay for 60hz (chip8 standard)
         SDL_Delay(100);
