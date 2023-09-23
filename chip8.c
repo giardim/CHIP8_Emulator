@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 #include "SDL.h"
 
 //https://github.com/kripod/chip8-roms
@@ -28,8 +29,18 @@ typedef enum{
 //machine object
 typedef struct{
     state_flags_t state;
+
     uint32_t ram[4096];     //Chip8 had 4096 memory locations, each a byte
     bool display[64*32];    //check if each pixel is on or off
+    uint16_t PC;            //Program counter
+    uint16_t stack[12];     //Subroutine stack -> 12 levels of nesting
+    uint8_t v[16];          //16 registers, V0 - VF each a byte
+    uint16_t I;             //Instruction register
+    //Both timers decrement at 60hz
+    uint8_t delay_timer;    //Delay timer
+    uint8_t sound_timer;    //Sound timer
+    bool keypad[16];        //hex keyboard, 0-F
+    const char* rom_name;         //Name of rom currently loaded
 }chip8_t;
 
 
@@ -40,7 +51,7 @@ bool set_config_setting(config_t *config, const int argc, char **argv){
     config -> screenHeight = 32;    //Default chip8 height
 
     config -> fgColor = 0xFFFFFFFF; //Color of pixels, chip8 was all white
-    config -> bgColor = 0xFFF00FFF; //Color of background, Chip8 was all black
+    config -> bgColor = 0x00000000; //Color of background, Chip8 was all black
     config -> scaleFactor = 20;     //Default resolution 1280x640
 
     for (int i = 1; i < argc; ++i){
@@ -78,8 +89,62 @@ bool init_sdl(sdl_t *sdl, const config_t config){
     return true;
 }
 
-bool init_chip8(chip8_t *chip8){
+bool init_chip8(chip8_t *chip8, const char rom_name[]){
+    const uint16_t entry_point = 0x0200;
+
+    const uint8_t font[] = {
+        0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+        0x20, 0x60, 0x20, 0x20, 0x70, // 1
+        0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+        0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+        0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+        0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+        0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+        0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+        0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
+        0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+        0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+        0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+        0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+        0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+        0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+        0xF0, 0x80, 0xF0, 0x80, 0x80  // F
+    };
+
+    //load font
+    memcpy(&chip8->ram[0], font, sizeof(font));
+
+    //load rom
+    FILE *rom = fopen(rom_name, "rb");
+    if (!rom){
+        SDL_Log("Could not load rom: %s\n", SDL_GetError());
+        return false;
+    }
+
+    //check rom size
+    fseek(rom, 0, SEEK_END);
+    const size_t rom_size = ftell(rom);
+    const size_t max_size = sizeof chip8->ram - entry_point;
+    rewind(rom);
+
+    if (rom_size > max_size){
+        SDL_Log("Rom is too big, exceeds max size: %s", SDL_GetError());
+        return false;
+    }
+
+    //Read into memory
+    if(fread(&chip8->ram[entry_point],rom_size, 1, rom) != 1){
+        SDL_Log("Could not read rom file: %s\n", SDL_GetError());
+        return false;
+    };
+
+    //Close file to prevent memory leaks
+    fclose(rom);
+
+    //Default
     chip8 -> state = RUNNING;
+    chip8 -> rom_name = rom_name;
+    chip8 -> PC = entry_point;             //Where chip8 programs are loaded
     return true;
 }
 
@@ -113,6 +178,15 @@ void get_input(chip8_t *chip8){
                     case(SDLK_ESCAPE):
                         chip8->state = QUIT;
                         break;
+                    case(SDLK_SPACE):
+                        if (chip8->state == RUNNING){
+                            puts("=====PAUSED=====");
+                            chip8->state = PAUSED;
+                        }else{
+                            puts("=====RUNNING=====");
+                            chip8->state = RUNNING;
+                        }
+                        break;
                     default:
                     break;
                 }
@@ -128,9 +202,14 @@ void get_input(chip8_t *chip8){
 }
 
 int main (int argc, char **argv){
+    if (argc<2){
+        fprintf(stderr, "Usage: %s <rom_name>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
     //set chip8 to the running state
     chip8_t chip8 = {0};
-    if (!init_chip8(&chip8)){
+    const char* rom_name = argv[1];
+    if (!init_chip8(&chip8, rom_name)){
         exit(EXIT_FAILURE);
     }
 
@@ -153,6 +232,8 @@ int main (int argc, char **argv){
     while(chip8.state != QUIT){
         //get input from the user
         get_input(&chip8);
+
+        if (chip8.state == PAUSED) continue;
 
         //delay for 60hz (chip8 standard)
         SDL_Delay(100);
