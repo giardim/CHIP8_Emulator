@@ -49,7 +49,7 @@ typedef struct{
     uint16_t PC;            //Program counter
     uint16_t stack[12];     //Subroutine stack -> 12 levels of nesting
     uint16_t *stack_ptr;    //Points to the stack and keeps track of how many subroutines are in the stack
-    uint8_t v[16];          //16 registers, V0 - VF each a byte
+    uint8_t V[16];          //16 registers, V0 - VF each a byte
     uint16_t I;             //Instruction register
     //Both timers decrement at 60hz
     uint8_t delay_timer;    //Delay timer
@@ -160,6 +160,7 @@ bool init_chip8(chip8_t *chip8, const char rom_name[]){
     chip8 -> state = RUNNING;
     chip8 -> rom_name = rom_name;
     chip8 -> PC = entry_point;             //Where chip8 programs are loaded
+    printf("Entry point %X\n", chip8->PC);
     chip8 -> stack_ptr = &chip8->stack[0];
     return true;
 }
@@ -181,7 +182,35 @@ void clear_window(const config_t config, sdl_t sdl){
     SDL_RenderClear(sdl.renderer);
 }
 
-void update_window(sdl_t sdl){
+void update_window(sdl_t sdl, const config_t config, const chip8_t chip8){
+    SDL_Rect rect = {.x = 0, .y = 0, .w = config.scaleFactor, .h = config.scaleFactor};
+
+    //Set colors
+    uint8_t fg_r = (config.fgColor >> 24) & 0xFF;
+    uint8_t fg_g = (config.fgColor >> 16) & 0xFF;
+    uint8_t fg_b = (config.fgColor >> 8) & 0xFF;
+    uint8_t fg_a = config.fgColor & 0xFF;
+
+    uint8_t bg_r = (config.bgColor >> 24) & 0xFF;
+    uint8_t bg_g = (config.bgColor >> 16) & 0xFF;
+    uint8_t bg_b = (config.bgColor >> 8) & 0xFF;
+    uint8_t bg_a = config.bgColor & 0xFF;
+
+
+    for (uint32_t i = 0; i < sizeof chip8.display; ++i){
+        rect.x = (i % config.screenWidth) * config.scaleFactor;
+        rect.y = (i / config.screenWidth) * config.scaleFactor;
+
+        //If the pixel is on, draw the foreground color, else draw the background color
+        if (chip8.display[i]){
+            SDL_SetRenderDrawColor(sdl.renderer, fg_r, fg_g, fg_b, fg_a);
+            SDL_RenderFillRect(sdl.renderer, &rect);
+        }else{
+            SDL_SetRenderDrawColor(sdl.renderer, bg_r, bg_g, bg_b, bg_a);
+            SDL_RenderFillRect(sdl.renderer, &rect);
+        }
+    }
+
     SDL_RenderPresent(sdl.renderer);
 }
 
@@ -217,38 +246,137 @@ void get_input(chip8_t *chip8){
     return;
 }
 
-void emulate_instruction(chip8_t *chip8){
-    //Get opcode
-    chip8->inst.opcode = (chip8->ram[chip8->PC] << 8) | chip8->ram[chip8->PC + 1] ;
-    chip8->PC += 2; //increment for next opcode
-
-    chip8->inst.NNN = chip8->inst.opcode & 0x0FFF;
-    chip8->inst.NN = chip8->inst.opcode & 0x00FF;
-    chip8->inst.N = chip8->inst.opcode & 0x0F;
-    chip8->inst.X = (chip8->inst.opcode >> 8) & 0x0F;
-    chip8->inst.Y = (chip8->inst.opcode >> 4) & 0x0F;
-    //Emulate opcode
-    switch (chip8->inst.opcode >> 12 & 0x0F){
-        case(0x0):
+#ifdef DEBUG
+    void print_debug_info(chip8_t *chip8){
+        printf("Address: 0x%04X, Opcode: 0x%04X, Desc: ", chip8->PC - 2, chip8->inst.opcode);
+        switch (chip8->inst.opcode >> 8){
+        case(0x00):
             if(chip8->inst.NN == 0xE0){
                 //Clear the screen
-                memset(&chip8->display, false, sizeof(chip8->display));
+                printf("Clear the screen\n");
+            }
+            else if (chip8->inst.NN == 0xEE){
+                //return from subroutine
+                printf("Returns from subroutine to address: 0x%04X\n", *(chip8->stack_ptr - 1));
+            }
+            else {
+                printf("Error\n");
+            }
+            break;
+        case(0x02):
+            //call Subroutine
+            //Put current program in the stack so we can return to it later, then set the
+            //  program counter to the last 12bits in the opcode (NNN)
+            printf("Call subroutine\n");
+            break;
+        case(0x06):
+            //Set VX to NN
+            printf("Set V[%01X] to NN(0x%02X)\n", chip8->inst.X, chip8->inst.NN);
+            break;
+        case(0x07):
+            //Set VX to NN
+            printf("Set V[%01X] += NN(0x%02X)\n", chip8->inst.X, chip8->inst.NN);
+            break;
+        case(0x0A):
+            //Set register I to NNN
+            printf("Set I to NNN (0x%04X)\n", chip8->inst.NNN);
+            break;
+        case(0x0D):
+            printf("Drawing N (%u) height sprite at coords V%X (0x%02X) V%X (0x%02X) from memory location I (0x%04X)."
+                " Set VF = 1 if any pixels are turned off\n", chip8->inst.N, chip8->inst.X, chip8->V[chip8->inst.X],
+                chip8->inst.Y, chip8->V[chip8->inst.Y], chip8->I);
+            break;
+        default:
+            printf("unimplemented opcode\n");
+            break;
+
+    }
+}
+#endif
+
+void emulate_instruction(chip8_t *chip8, config_t *config){
+    //Get opcode
+    chip8->inst.opcode = (chip8->ram[chip8->PC]) << 8 | chip8->ram[chip8->PC];
+    printf("0x%04X\n", chip8->inst.opcode);
+    chip8->PC += 2; //increment for next opcode
+
+    chip8->inst.NNN = chip8->inst.opcode >> 8 & 0x0FFF;
+    chip8->inst.NN = chip8->inst.opcode >> 8 & 0x0FF;
+    chip8->inst.N = chip8->inst.opcode >> 8 & 0x0F;
+    chip8->inst.X = (chip8->inst.opcode >> 8) & 0x0F;
+    chip8->inst.Y = (chip8->inst.opcode >> 4) & 0x0F;
+     printf("0x%04X\n", chip8->inst.NNN);
+
+#ifdef DEBUG
+    print_debug_info(chip8);
+#endif
+
+    //printf("0x%04X\n", chip8->inst.opcode);
+    //Emulate opcode
+    switch (chip8->inst.opcode){
+
+        case(0x00):
+            if(chip8->inst.NN == 0xE0){
+                //Clear the screen
+                memset(&chip8->display, false, sizeof chip8->display);
             }
             else if (chip8->inst.NN == 0xEE){
                 //return from subroutine
                 chip8 -> PC = *--chip8 -> stack_ptr;
             }
             break;
-        case(0x2):
+        case(0x02):
             //call Subroutine
             //Put current program in the stack so we can return to it later, then set the
             //  program counter to the last 12bits in the opcode (NNN)
-            *chip8->stack_ptr = chip8->PC;
-            chip8->stack_ptr++;
+            *chip8->stack_ptr++ = chip8->PC;
             chip8->PC = chip8->inst.NNN;
             break;
+        case(0x06):
+            //Set VX to NN
+            chip8->V[chip8->inst.X] = chip8->inst.NN;
+            break;
+        case(0x07):
+            //Set VX += NN
+            chip8->V[chip8->inst.X] += chip8->inst.NN;
+            break;
+        case(0x0A):
+            //Set register I to NNN
+            chip8->I = chip8->inst.NNN;
+            break;
+        case(0x0D):
+            //Draw sprite at coordinate VX, VY, height of N, read from I
+            //VF is set
+            uint8_t X = chip8->V[chip8->inst.X] % config->screenWidth;
+            uint8_t Y = chip8->V[chip8->inst.Y] % config->screenHeight;
+            const uint8_t original_X = X;
+            chip8->V[0xF] = 0;
+
+            for(uint8_t i = 0; i < chip8->inst.N; ++i){
+                const uint8_t sprite_data = chip8->ram[chip8->I + i];
+                X = original_X;
+                for (int8_t j = 7; j >= 0; --j){
+                    //If the bit in the spite and the bit on the display is on, set the carry
+                    //  Flag to 1
+                    bool *pixel = &chip8->display[Y * config->screenHeight + X];
+                    const bool sprite_bit = (sprite_data & (1 << j));
+                    if (sprite_bit && *pixel){
+                        chip8->V[0xF] = 1;
+                    }
+                    //set the pixel on or off
+                    *pixel ^= sprite_bit;
+
+                    if (++X >= config->screenWidth){
+                        break;
+                    }
+                }
+                if (++Y >= config->screenHeight){
+                    break;
+                }
+            }
+            break;
         default:
-            puts("ERROR: INVALID OPCODE PRESENT");
+            // puts("ERROR: INVALID OPCODE PRESENT");
             break;
 
     }
@@ -288,11 +416,11 @@ int main (int argc, char **argv){
 
         if (chip8.state == PAUSED) continue;
 
-        emulate_instruction(&chip8);
+        emulate_instruction(&chip8, &config);
 
         //delay for 60hz (chip8 standard)
-        SDL_Delay(100);
-        update_window(sdl);
+        SDL_Delay(16);
+        update_window(sdl, config, chip8);
 
     }
 
